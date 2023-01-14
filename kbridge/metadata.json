@@ -1,0 +1,22 @@
+{
+    "KPlugin": {
+        "Name": "KDE Time Tracker",
+        "Description": "Window focus tracker",
+        "Icon": "preferences-system-windows",
+        "Authors": [
+            {
+                "Email": "ck@taranis.org",
+                "Name": "Christophe Kalt"
+            }
+        ],
+        "Id": "ktt",
+        "ServiceTypes": [
+            "KWin/Script"
+        ],
+        "Version": "0.1",
+        "Licsense": "BSDL",
+        "Website": "https://github.com/syrkuit/ktt"
+    },
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js"
+}
