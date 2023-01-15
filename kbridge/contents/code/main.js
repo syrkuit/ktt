@@ -3,6 +3,12 @@ function sendLog(message) {
     callDBus("com.github.syrkuit.ktt", "/KTT", "com.github.syrkuit.ktt", "Log", message, function() {});
 }
 
+function screenUpdate() {
+    callDBus("com.github.syrkuit.ktt", "/KTT", "com.github.syrkuit.ktt", "ScreenConfiguration",
+             workspace.numScreens, workspace.virtualScreenSize.width, workspace.virtualScreenSize.height,
+             function() {});
+}
+
 function watchClient(client) {
     if (client.specialWindow || client.modal || client.transientFor) return;
     client.activeChanged.connect(function() { changedClient(client); });
@@ -31,6 +37,8 @@ function changedClient(client) {
     }
 }
 
+workspace.numberScreensChanged.connect(x => screenUpdate());
+workspace.virtualScreenSizeChanged.connect(screenUpdate);
 workspace.clientAdded.connect(watchClient);
 workspace.clientList().forEach(client => watchClient(client))
 

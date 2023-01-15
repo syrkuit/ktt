@@ -71,6 +71,10 @@ class KwinBridge(ServiceInterface):
         logging.info(msg)
 
     @method()
+    def ScreenConfiguration(self, num: 'i', width: 'i', height: 'i'):
+        logging.info(f"screen configuration: {num} {width}x{height}");
+
+    @method()
     def Focus(self, desktop: 'i', window: 's'):
         shortname = re.split(r' [^\w\s] ', window)[-1]
         if shortname.endswith('>‎'):  # Konsole <2>
