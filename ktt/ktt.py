@@ -2,6 +2,7 @@
 
 import asyncio
 import atexit
+from dbus_next import BusType
 from dbus_next.aio import MessageBus
 from dbus_next.service import (ServiceInterface, method)
 import logging
@@ -10,15 +11,100 @@ import re
 import time
 
 
+class NetworkManager(object):
+    # https://networkmanager.dev/docs/api/latest/spec.html
+    def __init__(self, nm):
+        self.nm = nm
+        self.cb = None
+        self.nm.on_state_changed(self.state_changed)
+
+    @classmethod
+    async def create(cls):
+        bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+        introspection = await bus.introspect('org.freedesktop.NetworkManager',
+                                             '/org/freedesktop/NetworkManager')
+        proxy = bus.get_proxy_object('org.freedesktop.NetworkManager',
+                                     '/org/freedesktop/NetworkManager',
+                                     introspection)
+        iface = proxy.get_interface('org.freedesktop.NetworkManager')
+
+        return NetworkManager(iface)
+
+    def register_callback(self, cb):
+        self.cb = cb
+
+    async def check_network(self):
+        try:
+            conns = await self.nm.get_active_connections()
+            for conn in conns:
+                introspection = await self.nm.bus.introspect('org.freedesktop.NetworkManager', conn)
+                proxy = self.nm.bus.get_proxy_object('org.freedesktop.NetworkManager', conn,
+                                                     introspection)
+                iface = proxy.get_interface('org.freedesktop.NetworkManager.Connection.Active')
+                default = await iface.get_default()
+                if not default:
+                    default = await iface.get_default6()
+                if not default: continue
+                return await iface.get_id()
+        except Exception as e:
+            logging.warning(f"failed to get active conenctions: {str(e)}")
+            return
+
+    def state_changed(self, state):
+        # https://networkmanager.dev/docs/api/latest/nm-dbus-types.html#NMState
+        if not self.cb:
+            return
+        if state in (60, 70):
+            task = asyncio.get_event_loop().create_task(self.check_network())
+            task.add_done_callback(lambda x: self.cb(x.result()))
+        else:
+            self.cb(None)
+
+
+class ScreenSaver(object):
+    def __init__(self, ss):
+        self.ss = ss
+        self.cb = None
+        self.ss.on_active_changed(self.active_changed)
+
+    @classmethod
+    async def create(cls):
+        bus = await MessageBus().connect()
+        introspection = await bus.introspect('org.kde.screensaver', '/org/freedesktop/ScreenSaver')
+        proxy = bus.get_proxy_object('org.kde.screensaver', '/ScreenSaver', introspection)
+        iface = proxy.get_interface('org.freedesktop.ScreenSaver')
+
+        return ScreenSaver(iface)
+
+    def register_callback(self, cb):
+        self.cb = cb
+
+    async def check_idletime(self):
+        try:
+            return await self.ss.call_get_session_idle_time()
+        except Exception as e:
+            logging.warning(f"failed to get idle time: {str(e)}")
+            return
+
+    def active_changed(self, on):
+        if self.cb:
+            self.cb(on)
+
+
 class FocusTracker(object):
-    def __init__(self, screensaver):
-        self.ssbus = screensaver
+    def __init__(self, screensaver, networkmanager):
+        self.ss = screensaver
+        self.nm = networkmanager
         self.window = None
         self.wstart = 0
         self.start = time.time()
         self.total = 0
         self.last = time.time()
         asyncio.get_event_loop().call_soon(self.nap_check)
+        self.ss.register_callback(self.screensaver)
+        self.nm.register_callback(self.network)
+        task = asyncio.get_event_loop().create_task(self.nm.check_network())
+        task.add_done_callback(lambda x: self.network(x.result()))
 
     def focus(self, window):
         if window == self.window:
@@ -32,23 +118,25 @@ class FocusTracker(object):
         self.window = window
         self.wstart = time.time()
 
-    async def check_idletime(self):
-        try:
-            idle = await self.ssbus.call_get_session_idle_time()
-        except Exception as e:
-            logging.warning(f"failed to get idle time: {str(e)}")
-            return
-        self.total -= int(idle / 1000)
-        logging.info(f"idle for {idle/1000:.0f}s, total={self.total:.0f}")
+    def idle(self, idle):
+        if idle:
+            self.total -= int(idle / 1000)
+            logging.info(f"idle for {idle/1000:.0f}s, total={self.total:.0f}")
 
     def screensaver(self, on):
         if on:
             self.focus(None)
             self.total += time.time() - self.start
-            asyncio.get_event_loop().create_task(self.check_idletime())
+            task = asyncio.get_event_loop().create_task(self.ss.check_idletime())
+            task.add_done_callback(lambda x: self.idle(x.result()))
         else:
             self.start = time.time()
         logging.info(f"screensaver={on} total={self.total:.0f}")
+
+    def network(self, network):
+        if self.network != network:
+            self.network = network
+            logging.info(f"network: {network}")
 
     def nap_check(self):
         elapsed = time.time() - self.last
@@ -94,17 +182,14 @@ class KwinBridge(ServiceInterface):
 
 
 async def main():
-    bus = await MessageBus().connect()
+    # initialize tracker
+    nm = await NetworkManager.create()
+    ss = await ScreenSaver.create()
+    tracker = FocusTracker(ss, nm)
 
-    # listen to screensaver events
-    introspection = await bus.introspect('org.kde.screensaver', '/org/freedesktop/ScreenSaver')
-    #print(introspection.tostring())
-    ssobj = bus.get_proxy_object('org.kde.screensaver', '/ScreenSaver', introspection)
-    ssiface = ssobj.get_interface('org.freedesktop.ScreenSaver')
-    tracker = FocusTracker(ssiface)
-    ssiface.on_active_changed(tracker.screensaver)
-
+    # set up KTT service
     interface = KwinBridge(tracker)
+    bus = await MessageBus().connect()
     bus.export('/KTT', interface)
     await bus.request_name('com.github.syrkuit.ktt')
     await bus.wait_for_disconnect()
